@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""xlsx-provenance — fingerprint .xlsx files for authorship and authenticity.
+"""xlsx-provenance: fingerprint .xlsx files for authorship and authenticity.
 
 Reads OOXML metadata + zip-internal structure to distinguish Excel-authored
 files from those produced by libraries (openpyxl, xlsxwriter, Aspose,
@@ -275,7 +275,7 @@ def _verdict(fp: Fingerprint):
     signals = []
     label, _, sev = _classify_app(fp.application)
 
-    # Hard library match — short-circuit
+    # Hard library match (short-circuit)
     if label and sev == "neg":
         fp.verdict = label
         fp.verdict_reason = f"Application explicitly declares {label.lower().replace('_', ' ')}"
@@ -292,7 +292,7 @@ def _verdict(fp: Fingerprint):
         fp.signals = signals
         return
 
-    # Excel positive signals — scored
+    # Excel positive signals (scored)
     score = 0
     if label in {"EXCEL_MAC", "EXCEL_WIN", "EXCEL_OTHER"}:
         score += 3
@@ -310,7 +310,7 @@ def _verdict(fp: Fingerprint):
         score += 1
         signals.append(f"theme1.xml {fp.theme_size}B (real Excel theme)")
     elif fp.has_theme and fp.theme_size > 0:
-        signals.append(f"theme1.xml {fp.theme_size}B (small — likely library default)")
+        signals.append(f"theme1.xml {fp.theme_size}B (small, likely library default)")
     if fp.has_theme_override:
         score += 1
         signals.append("Content_Types theme override")

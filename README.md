@@ -6,7 +6,7 @@ Stdlib-only Python. No third-party dependencies.
 
 ## Why
 
-An `.xlsx` is a zip of XML. Every authoring tool leaves fingerprints — different `Application` strings, different `fileVersion` attributes, different presence/absence of `calcChain.xml`, `theme1.xml`, `printerSettings*.bin`, `<HeadingPairs>`, `<TitlesOfParts>`, `cellXfs count=""` attributes, and so on.
+An `.xlsx` is a zip of XML. Every authoring tool leaves fingerprints: different `Application` strings, different `fileVersion` attributes, different presence/absence of `calcChain.xml`, `theme1.xml`, `printerSettings*.bin`, `<HeadingPairs>`, `<TitlesOfParts>`, `cellXfs count=""` attributes, and so on.
 
 This tool reads those fingerprints and gives you a per-file verdict you can act on.
 
@@ -41,26 +41,26 @@ Exit code is `0` if every file is verdict `EXCEL_*` or a non-Excel office suite 
 
 | Verdict | Meaning |
 |---|---|
-| `EXCEL_MAC` | `Microsoft Macintosh Excel` — authentic Excel for Mac |
-| `EXCEL_WIN` | `Microsoft Excel` — authentic Excel for Windows / Online |
+| `EXCEL_MAC` | `Microsoft Macintosh Excel`. Authentic Excel for Mac |
+| `EXCEL_WIN` | `Microsoft Excel`. Authentic Excel for Windows or Online |
 | `EXCEL_OTHER` | Some other Excel variant string, but Excel `fileVersion` confirmed |
 | `EXCEL_LIKELY` | No explicit Application, but enough Excel-only artifacts (calcChain, fileVersion appName=xl, real theme, printerSettings, VBA, threaded comments, etc.) to be confident |
 | `OPENPYXL`, `XLSXWRITER`, `ASPOSE`, `CLOSEDXML`, `EPPLUS`, `OPENXML_SDK`, `SHEETJS`, `SPREADJS`, `SYNCFUSION`, `GEMBOX`, `SPIRE`, `LUCKYSHEET`, `PYTHON_XLSX` | Application string explicitly declared a generation library |
 | `LIBREOFFICE`, `ONLYOFFICE`, `OPENOFFICE`, `GNUMERIC`, `CALLIGRA`, `WPS_OFFICE`, `APPLE_NUMBERS`, `GOOGLE_SHEETS` | Authentic but non-Excel office suite |
-| `SUSPECT` | No `Application` and no `fileVersion` — looks tampered or hand-built |
+| `SUSPECT` | No `Application` and no `fileVersion`. Looks tampered or hand-built |
 | `UNKNOWN` | Couldn't classify |
 | `MISSING` | File doesn't exist |
 | `INVALID` | Not a valid zip / corrupted |
 
 ## Signals examined
 
-- **`docProps/app.xml`** — `Application`, `AppVersion`, `Company`, `Manager`, `DocSecurity`, presence of `HeadingPairs` + `TitlesOfParts` (Excel-only, openpyxl skips)
-- **`docProps/core.xml`** — `creator`, `lastModifiedBy`, `created` / `modified` timestamps (and their delta — < 1s smells automated), `lastPrinted`
-- **`xl/workbook.xml`** — `<fileVersion appName="xl" rupBuild="...">` (Excel-only), `workbookPr/@codeName`, defined names, sheet count
-- **Zip artifacts** — `calcChain.xml` (Excel writes, libraries usually skip), `theme/theme1.xml` size (Excel: ~6796–8390 B; openpyxl: < 4 KB), `printerSettings*.bin`, `vbaProject.bin`, `pivotTables/`, `pivotCache/`, `connections.xml`, `externalLinks/`, `charts/`, `drawings/`, `comments*.xml`, `threadedComments` (Excel 365), `tables/`, `queryTables/`
-- **`xl/styles.xml`** — Excel often *omits* `count="N"` on `<cellXfs>`; openpyxl always includes it. Excel writes `<tableStyles>`, `<indexedColors>`.
-- **`xl/sharedStrings.xml`** — `uniqueCount` attribute presence
-- **`[Content_Types].xml`** — number of overrides, presence of theme override
+- **`docProps/app.xml`**: `Application`, `AppVersion`, `Company`, `Manager`, `DocSecurity`, presence of `HeadingPairs` + `TitlesOfParts` (Excel-only, openpyxl skips)
+- **`docProps/core.xml`**: `creator`, `lastModifiedBy`, `created` / `modified` timestamps (and their delta; < 1s smells automated), `lastPrinted`
+- **`xl/workbook.xml`**: `<fileVersion appName="xl" rupBuild="...">` (Excel-only), `workbookPr/@codeName`, defined names, sheet count
+- **Zip artifacts**: `calcChain.xml` (Excel writes, libraries usually skip), `theme/theme1.xml` size (Excel: ~6796–8390 B; openpyxl: < 4 KB), `printerSettings*.bin`, `vbaProject.bin`, `pivotTables/`, `pivotCache/`, `connections.xml`, `externalLinks/`, `charts/`, `drawings/`, `comments*.xml`, `threadedComments` (Excel 365), `tables/`, `queryTables/`
+- **`xl/styles.xml`**: Excel often *omits* `count="N"` on `<cellXfs>`; openpyxl always includes it. Excel writes `<tableStyles>`, `<indexedColors>`.
+- **`xl/sharedStrings.xml`**: `uniqueCount` attribute presence
+- **`[Content_Types].xml`**: number of overrides, presence of theme override
 
 The verdict combines a hard match on the `Application` string with a soft score (0–14) over the structural signals. High score with no library declaration → `EXCEL_LIKELY`.
 
@@ -100,7 +100,7 @@ xlsx-provenance --json *.xlsx | jq '.[] | select(.verdict == "OPENPYXL") | .path
 
 ## How to "fix" an openpyxl-generated file
 
-Open it in real Excel and `File → Save As` (overwrite or new name). Excel rewrites every metadata field — `Application`, `fileVersion`, `calcChain`, theme — to its native fingerprint. Editing `docProps/app.xml` by hand only fixes the visible Application string and leaves the deeper structural tells intact.
+Open it in real Excel and `File → Save As` (overwrite or new name). Excel rewrites every metadata field (`Application`, `fileVersion`, `calcChain`, theme) to its native fingerprint. Editing `docProps/app.xml` by hand only fixes the visible Application string and leaves the deeper structural tells intact.
 
 ## License
 
