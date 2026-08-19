@@ -9,3 +9,4 @@ jobs:
       - run: uv build
       - run: uv run --with dist/*.whl xlsx-provenance --help
       - run: ./xlsx-provenance --help
+      - run: uv run --with pytest pytest -q

@@ -29,6 +29,32 @@ git clone https://github.com/jtannahill/xlsx-provenance.git
 ./xlsx-provenance/xlsx-provenance some-file.xlsx
 ```
 
+## Editing metadata
+
+The same tool can rewrite the declared metadata, either to scrub a file before
+sharing it or to set the properties you want.
+
+```bash
+xlsx-provenance --strip report.xlsx                      # blank author, company, dates, application... in place
+xlsx-provenance --strip --backup report.xlsx             # same, keeping report.xlsx.bak
+xlsx-provenance --strip -o clean.xlsx report.xlsx        # write to a new file
+xlsx-provenance --set creator="Jane Doe" --set company=Acme --set created=2024-01-02 report.xlsx
+xlsx-provenance --strip --set creator="Jane Doe" report.xlsx   # scrub, then set just one
+xlsx-provenance --list-properties                        # keys accepted by --set
+```
+
+Only `docProps/core.xml` and `docProps/app.xml` are rewritten. Every other zip
+member is copied byte for byte in its original order, so the workbook stays
+exactly as valid as it was and the structural provenance signals are untouched.
+An empty value (`--set manager=`) removes a property; dates take ISO 8601 and
+are stored as UTC.
+
+This edits *declared* metadata. It is not a way to pass a generated file off as
+Excel-authored: the analyzer requires the workbook body to corroborate a
+declared Excel application (fileVersion, theme, styles, calcChain...), and a
+file that claims Excel without that structure is reported as `SUSPECT`. A
+stripped file is reported with a `metadata=stripped` signal.
+
 ## Usage
 
 ```bash

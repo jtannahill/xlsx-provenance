@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xlsx-provenance"
-version = "1.0.0"
+version = "1.1.0"
 description = "Fingerprint .xlsx files for authorship and authenticity: Excel vs openpyxl, xlsxwriter, Aspose, LibreOffice and others"
 readme = "README.md"
 license = "MIT"
@@ -38,4 +38,4 @@ xlsx-provenance = "xlsx_provenance:main"
 only-include = ["xlsx_provenance.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["xlsx_provenance.py", "README.md", "LICENSE", "pyproject.toml"]
+include = ["xlsx_provenance.py", "README.md", "LICENSE", "pyproject.toml", "tests/**"]

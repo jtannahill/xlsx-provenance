@@ -111,6 +111,8 @@ class Fingerprint:
     # [Content_Types].xml
     has_theme_override: bool = False
     content_types_override_count: int = 0
+    # docProps present but every property blank (e.g. after --strip)
+    metadata_stripped: bool = False
     # Verdict
     verdict: str = "UNKNOWN"
     verdict_reason: str = ""
@@ -198,6 +200,11 @@ def fingerprint(path: Path) -> Fingerprint:
                     pass
         except ET.ParseError:
             pass
+    if app_xml is not None and core_xml is not None:
+        fp.metadata_stripped = not any([
+            fp.application, fp.app_version, fp.company, fp.manager,
+            fp.creator, fp.last_modified_by, fp.created, fp.modified,
+        ])
 
     fp.has_custom_props = "docProps/custom.xml" in names
 
@@ -273,6 +280,8 @@ def fingerprint(path: Path) -> Fingerprint:
 
 def _verdict(fp: Fingerprint):
     signals = []
+    if fp.metadata_stripped:
+        signals.append("metadata=stripped")
     label, _, sev = _classify_app(fp.application)
 
     # Hard library match (short-circuit)
@@ -350,6 +359,21 @@ def _verdict(fp: Fingerprint):
     fp.signals = signals
     fp.excel_score = score
 
+    excel_labels = {"EXCEL_MAC", "EXCEL_WIN", "EXCEL_OTHER"}
+    # A declared Excel Application is cheap to write (or edit in), so it only
+    # counts when the workbook body corroborates it. Structural score excludes
+    # the 3 points the declaration itself earns.
+    structural = score - (3 if label in excel_labels else 0)
+    if label in excel_labels and structural < 3:
+        fp.verdict = "SUSPECT"
+        fp.verdict_reason = (
+            f"declares {fp.application!r} but lacks Excel structure "
+            f"(structural score {structural}/11)"
+        )
+        fp.confidence = "medium"
+        signals.append("declared Excel app not corroborated by structure")
+        return
+
     if label == "EXCEL_MAC":
         fp.verdict = "EXCEL_MAC"
     elif label == "EXCEL_WIN":
@@ -376,6 +400,200 @@ VERDICT_COLOR = {
     "CALLIGRA": YLW, "WPS_OFFICE": YLW, "APPLE_NUMBERS": YLW, "GOOGLE_SHEETS": YLW,
     "SUSPECT": YLW, "UNKNOWN": YLW, "MISSING": RED, "INVALID": RED,
 }
+
+
+# --------------------------------------------------------------------------
+# Metadata editing
+#
+# Only docProps/core.xml and docProps/app.xml are rewritten. Every other zip
+# member is copied byte for byte in its original order with its original
+# compression, so structural provenance signals (calcChain, theme, styles
+# counts, entry order...) are untouched. This edits declared metadata; it
+# does not, and is not meant to, disguise which tool produced the workbook.
+# --------------------------------------------------------------------------
+
+CORE_NS = NS["cp"]
+APP_NS = NS["ep"]
+VT_NS = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+
+# property name -> (part, namespace, element local name)
+PROPERTIES = {
+    "title":            ("core", NS["dc"],  "title"),
+    "subject":          ("core", NS["dc"],  "subject"),
+    "creator":          ("core", NS["dc"],  "creator"),
+    "keywords":         ("core", CORE_NS,   "keywords"),
+    "description":      ("core", NS["dc"],  "description"),
+    "last_modified_by": ("core", CORE_NS,   "lastModifiedBy"),
+    "revision":         ("core", CORE_NS,   "revision"),
+    "created":          ("core", NS["dct"], "created"),
+    "modified":         ("core", NS["dct"], "modified"),
+    "last_printed":     ("core", CORE_NS,   "lastPrinted"),
+    "category":         ("core", CORE_NS,   "category"),
+    "content_status":   ("core", CORE_NS,   "contentStatus"),
+    "application":      ("app",  APP_NS,    "Application"),
+    "app_version":      ("app",  APP_NS,    "AppVersion"),
+    "company":          ("app",  APP_NS,    "Company"),
+    "manager":          ("app",  APP_NS,    "Manager"),
+    "doc_security":     ("app",  APP_NS,    "DocSecurity"),
+    "total_time":       ("app",  APP_NS,    "TotalTime"),
+    "template":         ("app",  APP_NS,    "Template"),
+}
+DATE_PROPERTIES = {"created", "modified", "last_printed"}
+
+# Core-part elements in the order Excel writes them; unknown ones are appended.
+_CORE_ORDER = [
+    (NS["dc"], "title"), (NS["dc"], "subject"), (NS["dc"], "creator"),
+    (CORE_NS, "keywords"), (NS["dc"], "description"), (CORE_NS, "lastModifiedBy"),
+    (CORE_NS, "revision"), (CORE_NS, "lastPrinted"), (NS["dct"], "created"),
+    (NS["dct"], "modified"), (CORE_NS, "category"), (CORE_NS, "contentStatus"),
+]
+
+_EMPTY_CORE = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<cp:coreProperties xmlns:cp="{CORE_NS}" xmlns:dc="{NS["dc"]}" '
+    f'xmlns:dcterms="{NS["dct"]}" xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>'
+)
+_EMPTY_APP = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<Properties xmlns="{APP_NS}" xmlns:vt="{VT_NS}"/>'
+)
+
+
+def _register_namespaces():
+    ET.register_namespace("cp", CORE_NS)
+    ET.register_namespace("dc", NS["dc"])
+    ET.register_namespace("dcterms", NS["dct"])
+    ET.register_namespace("dcmitype", "http://purl.org/dc/dcmitype/")
+    ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+    ET.register_namespace("", APP_NS)
+    ET.register_namespace("vt", VT_NS)
+
+
+def _normalize_date(value: str) -> str:
+    """Accept ISO 8601 (with or without time/zone); emit W3CDTF UTC 'Z' form."""
+    v = value.strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        raise ValueError(f"not an ISO 8601 date: {value!r}")
+    if dt.tzinfo is None:
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+    from datetime import timezone as _tz
+    return dt.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _set_element(root, ns, local, value, is_date=False):
+    tag = f"{{{ns}}}{local}"
+    elt = root.find(tag)
+    if value is None or value == "":
+        if elt is not None:
+            root.remove(elt)
+        return
+    if elt is None:
+        elt = ET.SubElement(root, tag)
+    elt.text = value
+    if is_date:
+        elt.set("{http://www.w3.org/2001/XMLSchema-instance}type", "dcterms:W3CDTF")
+
+
+def _reorder_core(root):
+    rank = {k: i for i, k in enumerate(_CORE_ORDER)}
+    children = list(root)
+    for c in children:
+        root.remove(c)
+    def key(c):
+        if c.tag.startswith("{"):
+            ns, local = c.tag[1:].split("}", 1)
+            return rank.get((ns, local), len(rank))
+        return len(rank)
+    for c in sorted(children, key=key):
+        root.append(c)
+
+
+def _strip_app(root):
+    """Blank identifying properties but keep the structural ones Excel
+    relies on (HeadingPairs, TitlesOfParts, ScaleCrop, LinksUpToDate...)."""
+    for local in ("Application", "AppVersion", "Company", "Manager",
+                  "TotalTime", "Template", "DocSecurity"):
+        _set_element(root, APP_NS, local, None)
+
+
+def _strip_core(root):
+    for c in list(root):
+        root.remove(c)
+
+
+def _serialize(root) -> bytes:
+    body = ET.tostring(root, encoding="unicode")
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + body).encode("utf-8")
+
+
+def rewrite_metadata(src: Path, dst: Path, *, strip: bool = False,
+                     updates: Optional[dict] = None) -> dict:
+    """Write a copy of src to dst with docProps edited.
+
+    strip=True blanks all identifying properties first; updates then sets
+    individual properties (value "" removes one). Returns the properties
+    written. dst may equal src (atomic replace via temp file)."""
+    _register_namespaces()
+    updates = dict(updates or {})
+    for k in updates:
+        if k not in PROPERTIES:
+            raise KeyError(f"unknown property {k!r}; valid: {', '.join(sorted(PROPERTIES))}")
+    for k in list(updates):
+        if k in DATE_PROPERTIES and updates[k]:
+            updates[k] = _normalize_date(updates[k])
+
+    with zipfile.ZipFile(src) as zin:
+        names = zin.namelist()
+        core_xml = zin.read("docProps/core.xml") if "docProps/core.xml" in names else None
+        app_xml = zin.read("docProps/app.xml") if "docProps/app.xml" in names else None
+
+        core_root = ET.fromstring(core_xml) if core_xml else ET.fromstring(_EMPTY_CORE)
+        app_root = ET.fromstring(app_xml) if app_xml else ET.fromstring(_EMPTY_APP)
+
+        if strip:
+            _strip_core(core_root)
+            _strip_app(app_root)
+        for k, v in updates.items():
+            part, ns, local = PROPERTIES[k]
+            root = core_root if part == "core" else app_root
+            _set_element(root, ns, local, v, is_date=(k in DATE_PROPERTIES))
+        _reorder_core(core_root)
+
+        new_parts = {
+            "docProps/core.xml": _serialize(core_root),
+            "docProps/app.xml": _serialize(app_root),
+        }
+
+        tmp = dst.with_name(dst.name + ".tmp-xlsxprov")
+        with zipfile.ZipFile(tmp, "w") as zout:
+            written = set()
+            for info in zin.infolist():
+                if info.filename in new_parts:
+                    zout.writestr(info, new_parts[info.filename])
+                    written.add(info.filename)
+                else:
+                    zout.writestr(info, zin.read(info.filename))
+            # A file with no docProps at all gets them appended so the result
+            # has a place for the requested values. Content types / rels are
+            # left alone; Excel tolerates orphan docProps parts.
+            for name, data in new_parts.items():
+                if name not in written and (updates or not strip):
+                    zout.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+    tmp.replace(dst)
+
+    out = {}
+    for k, (part, ns, local) in PROPERTIES.items():
+        root = core_root if part == "core" else app_root
+        elt = root.find(f"{{{ns}}}{local}")
+        if elt is not None and elt.text:
+            out[k] = elt.text
+    return out
 
 
 def fmt_pretty(fp: Fingerprint, verbose: bool = False) -> str:
@@ -437,11 +655,27 @@ def main():
         prog="xlsx-provenance",
         description="Fingerprint .xlsx files for authorship and authenticity.",
     )
-    ap.add_argument("files", nargs="+", help="paths to .xlsx files")
+    ap.add_argument("files", nargs="*", help="paths to .xlsx files")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("-v", "--verbose", action="store_true", help="show signal breakdown")
     ap.add_argument("-q", "--quiet", action="store_true", help="one-line summary per file")
     ap.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    edit = ap.add_argument_group(
+        "metadata editing",
+        "Rewrite docProps only; all other zip members are copied byte for byte, "
+        "so structural provenance signals are unchanged.",
+    )
+    edit.add_argument("--strip", action="store_true",
+                      help="blank all identifying metadata (author, company, dates, application...)")
+    edit.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                      help="set a property (repeatable); empty value removes it. "
+                           "--list-properties shows valid keys")
+    edit.add_argument("-o", "--output", metavar="PATH",
+                      help="write the edited workbook here instead of in place (single input only)")
+    edit.add_argument("--backup", action="store_true",
+                      help="when editing in place, keep a copy as FILE.bak")
+    edit.add_argument("--list-properties", action="store_true",
+                      help="list the property keys accepted by --set and exit")
     args = ap.parse_args()
 
     if args.no_color or not sys.stdout.isatty():
@@ -449,6 +683,42 @@ def main():
         for k in list(VERDICT_COLOR):
             VERDICT_COLOR[k] = ""
 
+    if args.list_properties:
+        for k in sorted(PROPERTIES):
+            part = PROPERTIES[k][0]
+            print(f"{k:18} ({part}{', ISO 8601 date' if k in DATE_PROPERTIES else ''})")
+        return
+
+    if args.strip or args.set:
+        updates = {}
+        for item in args.set:
+            if "=" not in item:
+                ap.error(f"--set expects KEY=VALUE, got {item!r}")
+            k, v = item.split("=", 1)
+            updates[k.strip().lower().replace("-", "_")] = v
+        if args.output and len(args.files) != 1:
+            ap.error("-o/--output needs exactly one input file")
+        for f in args.files:
+            src = Path(f)
+            dst = Path(args.output) if args.output else src
+            if dst == src and args.backup:
+                import shutil
+                shutil.copy2(src, src.with_suffix(src.suffix + ".bak"))
+            try:
+                written = rewrite_metadata(src, dst, strip=args.strip, updates=updates)
+            except (KeyError, ValueError, zipfile.BadZipFile, OSError) as e:
+                print(f"{RED}error{RST}: {src}: {e}", file=sys.stderr)
+                sys.exit(2)
+            what = "stripped" if args.strip and not updates else "updated"
+            print(f"{GRN}{what}{RST} {dst}")
+            if written:
+                for k in sorted(written):
+                    print(f"  {DIM}{k:18}{RST} {written[k]}")
+        return
+
+
+    if not args.files:
+        ap.error("no files given")
     results = [fingerprint(Path(f)) for f in args.files]
 
     if args.json:
