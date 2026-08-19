@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xlsx-provenance"
+version = "1.0.0"
+description = "Fingerprint .xlsx files for authorship and authenticity: Excel vs openpyxl, xlsxwriter, Aspose, LibreOffice and others"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "James Tannahill" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["xlsx", "excel", "forensics", "provenance", "openpyxl", "metadata", "ooxml"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Office/Business :: Financial :: Spreadsheet",
+  "Topic :: Security",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/jtannahill/xlsx-provenance"
+Repository = "https://github.com/jtannahill/xlsx-provenance"
+Issues = "https://github.com/jtannahill/xlsx-provenance/issues"
+
+[project.scripts]
+xlsx-provenance = "xlsx_provenance:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["xlsx_provenance.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["xlsx_provenance.py", "README.md", "LICENSE", "pyproject.toml"]

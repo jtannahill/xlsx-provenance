@@ -18,15 +18,15 @@ This tool reads those fingerprints and gives you a per-file verdict you can act 
 ## Install
 
 ```bash
-git clone https://github.com/jtannahill/xlsx-provenance.git ~/xlsx-provenance
-ln -s ~/xlsx-provenance/xlsx-provenance ~/bin/xlsx-provenance
-# ensure ~/bin is on PATH
+pipx install xlsx-provenance        # or: uv tool install xlsx-provenance
+brew install jtannahill/tap/xlsx-provenance
 ```
 
-Or just run the script directly:
+Or run straight from a checkout (no install, stdlib only):
 
 ```bash
-~/xlsx-provenance/xlsx-provenance some-file.xlsx
+git clone https://github.com/jtannahill/xlsx-provenance.git
+./xlsx-provenance/xlsx-provenance some-file.xlsx
 ```
 
 ## Usage

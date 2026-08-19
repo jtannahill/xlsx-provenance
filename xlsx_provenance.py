@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""xlsx-provenance: fingerprint .xlsx files for authorship and authenticity.
+
+Reads OOXML metadata + zip-internal structure to distinguish Excel-authored
+files from those produced by libraries (openpyxl, xlsxwriter, Aspose,
+ClosedXML, EPPlus, LibreOffice, OnlyOffice, Numbers, SheetJS...).
+
+Stdlib only.
+"""
+
+import argparse
+import json
+import re
+import sys
+import zipfile
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from xml.etree import ElementTree as ET
+
+RED, GRN, YLW, CYN, MAG, DIM, BLD, RST = (
+    "\033[31m", "\033[32m", "\033[33m", "\033[36m",
+    "\033[35m", "\033[2m", "\033[1m", "\033[0m",
+)
+
+NS = {
+    "ep":  "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+    "cp":  "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+    "dc":  "http://purl.org/dc/elements/1.1/",
+    "dct": "http://purl.org/dc/terms/",
+    "x":   "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "ct":  "http://schemas.openxmlformats.org/package/2006/content-types",
+}
+
+# (substring in Application, normalized verdict, color, severity)
+# Severity drives exit code: "neg" = library/automated tool, "neu" = office suite, "pos" = Excel.
+LIB_SIGS = [
+    ("openpyxl",            "OPENPYXL",        RED, "neg"),
+    ("xlsxwriter",          "XLSXWRITER",      RED, "neg"),
+    ("aspose",              "ASPOSE",          RED, "neg"),
+    ("closedxml",           "CLOSEDXML",       RED, "neg"),
+    ("epplus",              "EPPLUS",          RED, "neg"),
+    ("documentformat.openxml", "OPENXML_SDK",  RED, "neg"),
+    ("python-xlsx",         "PYTHON_XLSX",     RED, "neg"),
+    ("sheetjs",             "SHEETJS",         RED, "neg"),
+    ("luckysheet",          "LUCKYSHEET",      RED, "neg"),
+    ("spreadjs",            "SPREADJS",        RED, "neg"),
+    ("syncfusion",          "SYNCFUSION",      RED, "neg"),
+    ("gembox",              "GEMBOX",          RED, "neg"),
+    ("spire",               "SPIRE",           RED, "neg"),
+    ("libreoffice",         "LIBREOFFICE",     YLW, "neu"),
+    ("onlyoffice",          "ONLYOFFICE",      YLW, "neu"),
+    ("openoffice",          "OPENOFFICE",      YLW, "neu"),
+    ("gnumeric",            "GNUMERIC",        YLW, "neu"),
+    ("calligra",            "CALLIGRA",        YLW, "neu"),
+    ("wps",                 "WPS_OFFICE",      YLW, "neu"),
+    ("kingsoft",            "WPS_OFFICE",      YLW, "neu"),
+    ("numbers",             "APPLE_NUMBERS",   YLW, "neu"),
+    ("google",              "GOOGLE_SHEETS",   YLW, "neu"),
+]
+
+
+@dataclass
+class Fingerprint:
+    path: str
+    exists: bool = True
+    error: Optional[str] = None
+    # docProps/app.xml
+    application: Optional[str] = None
+    app_version: Optional[str] = None
+    company: Optional[str] = None
+    manager: Optional[str] = None
+    doc_security: Optional[str] = None
+    heading_pairs: bool = False
+    titles_of_parts: bool = False
+    # docProps/core.xml
+    creator: Optional[str] = None
+    last_modified_by: Optional[str] = None
+    created: Optional[str] = None
+    modified: Optional[str] = None
+    last_printed: Optional[str] = None
+    edit_delta_seconds: Optional[float] = None
+    # xl/workbook.xml
+    file_version: Optional[dict] = None
+    code_name: Optional[str] = None
+    defined_names_count: int = 0
+    sheet_count: int = 0
+    # Zip artifacts
+    has_calc_chain: bool = False
+    has_theme: bool = False
+    theme_size: int = 0
+    has_printer_settings: bool = False
+    has_vba: bool = False
+    has_pivots: bool = False
+    has_connections: bool = False
+    has_external_links: bool = False
+    has_charts: bool = False
+    has_drawings: bool = False
+    has_comments: bool = False
+    has_threaded_comments: bool = False
+    has_custom_props: bool = False
+    has_tables: bool = False
+    has_query_tables: bool = False
+    entry_count: int = 0
+    # styles.xml / sharedStrings.xml signals
+    styles_has_count_attr: Optional[bool] = None
+    styles_has_table_styles: bool = False
+    styles_has_indexed_colors: bool = False
+    shared_strings_count_attr: Optional[bool] = None
+    # [Content_Types].xml
+    has_theme_override: bool = False
+    content_types_override_count: int = 0
+    # Verdict
+    verdict: str = "UNKNOWN"
+    verdict_reason: str = ""
+    confidence: str = "low"
+    excel_score: int = 0
+    signals: list = field(default_factory=list)
+
+
+def _text(elt):
+    return elt.text.strip() if elt is not None and elt.text else None
+
+
+def _classify_app(app: Optional[str]):
+    if not app:
+        return None, None, None
+    al = app.lower()
+    for substr, label, color, sev in LIB_SIGS:
+        if substr in al:
+            return label, color, sev
+    if "microsoft macintosh excel" in al:
+        return "EXCEL_MAC", GRN, "pos"
+    if al.strip() == "microsoft excel":
+        return "EXCEL_WIN", GRN, "pos"
+    if "microsoft excel" in al:
+        return "EXCEL_OTHER", GRN, "pos"
+    return None, None, None
+
+
+def fingerprint(path: Path) -> Fingerprint:
+    fp = Fingerprint(path=str(path))
+
+    if not path.exists():
+        fp.exists = False
+        fp.error = "file not found"
+        fp.verdict = "MISSING"
+        return fp
+
+    try:
+        zf = zipfile.ZipFile(path, "r")
+    except (zipfile.BadZipFile, OSError) as e:
+        fp.error = f"not a valid zip: {e}"
+        fp.verdict = "INVALID"
+        return fp
+
+    names = zf.namelist()
+    fp.entry_count = len(names)
+
+    def read(name):
+        try:
+            return zf.read(name).decode("utf-8", "replace")
+        except KeyError:
+            return None
+
+    # app.xml
+    app_xml = read("docProps/app.xml")
+    if app_xml:
+        try:
+            root = ET.fromstring(app_xml)
+            fp.application = _text(root.find("ep:Application", NS))
+            fp.app_version = _text(root.find("ep:AppVersion", NS))
+            fp.company = _text(root.find("ep:Company", NS))
+            fp.manager = _text(root.find("ep:Manager", NS))
+            fp.doc_security = _text(root.find("ep:DocSecurity", NS))
+            fp.heading_pairs = root.find("ep:HeadingPairs", NS) is not None
+            fp.titles_of_parts = root.find("ep:TitlesOfParts", NS) is not None
+        except ET.ParseError:
+            pass
+
+    # core.xml
+    core_xml = read("docProps/core.xml")
+    if core_xml:
+        try:
+            root = ET.fromstring(core_xml)
+            fp.creator = _text(root.find("dc:creator", NS))
+            fp.last_modified_by = _text(root.find("cp:lastModifiedBy", NS))
+            fp.created = _text(root.find("dct:created", NS))
+            fp.modified = _text(root.find("dct:modified", NS))
+            fp.last_printed = _text(root.find("cp:lastPrinted", NS))
+            if fp.created and fp.modified:
+                try:
+                    c = datetime.fromisoformat(fp.created.replace("Z", "+00:00"))
+                    m = datetime.fromisoformat(fp.modified.replace("Z", "+00:00"))
+                    fp.edit_delta_seconds = (m - c).total_seconds()
+                except ValueError:
+                    pass
+        except ET.ParseError:
+            pass
+
+    fp.has_custom_props = "docProps/custom.xml" in names
+
+    # workbook.xml
+    wb_xml = read("xl/workbook.xml")
+    if wb_xml:
+        try:
+            root = ET.fromstring(wb_xml)
+            fv = root.find("x:fileVersion", NS)
+            if fv is not None:
+                fp.file_version = dict(fv.attrib)
+            wbpr = root.find("x:workbookPr", NS)
+            if wbpr is not None and "codeName" in wbpr.attrib:
+                fp.code_name = wbpr.attrib["codeName"]
+            dns = root.find("x:definedNames", NS)
+            if dns is not None:
+                fp.defined_names_count = len(list(dns))
+            sheets = root.find("x:sheets", NS)
+            if sheets is not None:
+                fp.sheet_count = len(list(sheets))
+        except ET.ParseError:
+            pass
+
+    # Zip artifacts
+    fp.has_calc_chain = "xl/calcChain.xml" in names
+    fp.has_theme = "xl/theme/theme1.xml" in names
+    if fp.has_theme:
+        try:
+            fp.theme_size = zf.getinfo("xl/theme/theme1.xml").file_size
+        except KeyError:
+            pass
+    fp.has_printer_settings = any(n.startswith("xl/printerSettings/") for n in names)
+    fp.has_vba = "xl/vbaProject.bin" in names
+    fp.has_pivots = any(n.startswith("xl/pivotTables/") or n.startswith("xl/pivotCache/") for n in names)
+    fp.has_connections = "xl/connections.xml" in names
+    fp.has_external_links = any(n.startswith("xl/externalLinks/") for n in names)
+    fp.has_charts = any(n.startswith("xl/charts/") for n in names)
+    fp.has_drawings = any(n.startswith("xl/drawings/") for n in names)
+    fp.has_comments = any(n.startswith("xl/comments") for n in names)
+    fp.has_threaded_comments = any(n.startswith("xl/threadedComments") for n in names)
+    fp.has_tables = any(n.startswith("xl/tables/") for n in names)
+    fp.has_query_tables = any(n.startswith("xl/queryTables/") for n in names)
+
+    # styles.xml
+    styles_xml = read("xl/styles.xml")
+    if styles_xml:
+        fp.styles_has_count_attr = bool(re.search(r'<cellXfs[^>]+\bcount="\d+"', styles_xml))
+        fp.styles_has_table_styles = "<tableStyles" in styles_xml
+        fp.styles_has_indexed_colors = "<indexedColors" in styles_xml
+
+    # sharedStrings.xml
+    ss_xml = read("xl/sharedStrings.xml")
+    if ss_xml:
+        fp.shared_strings_count_attr = bool(re.search(r'\buniqueCount="\d+"', ss_xml))
+
+    # [Content_Types].xml
+    ct_xml = read("[Content_Types].xml")
+    if ct_xml:
+        try:
+            root = ET.fromstring(ct_xml)
+            overrides = root.findall("ct:Override", NS)
+            fp.content_types_override_count = len(overrides)
+            fp.has_theme_override = any(
+                "theme" in (o.attrib.get("PartName") or "") for o in overrides
+            )
+        except ET.ParseError:
+            pass
+
+    zf.close()
+    _verdict(fp)
+    return fp
+
+
+def _verdict(fp: Fingerprint):
+    signals = []
+    label, _, sev = _classify_app(fp.application)
+
+    # Hard library match (short-circuit)
+    if label and sev == "neg":
+        fp.verdict = label
+        fp.verdict_reason = f"Application explicitly declares {label.lower().replace('_', ' ')}"
+        fp.confidence = "high"
+        signals.append(f"app={fp.application!r}")
+        fp.signals = signals
+        return
+
+    if label and sev == "neu":
+        fp.verdict = label
+        fp.verdict_reason = f"Application declares {label.lower().replace('_', ' ')} (non-Excel office suite)"
+        fp.confidence = "high"
+        signals.append(f"app={fp.application!r}")
+        fp.signals = signals
+        return
+
+    # Excel positive signals (scored)
+    score = 0
+    if label in {"EXCEL_MAC", "EXCEL_WIN", "EXCEL_OTHER"}:
+        score += 3
+        signals.append(f"app={fp.application!r}")
+
+    if fp.file_version and fp.file_version.get("appName") == "xl":
+        score += 3
+        rb = fp.file_version.get("rupBuild", "?")
+        signals.append(f"fileVersion appName=xl rupBuild={rb}")
+
+    if fp.has_calc_chain:
+        score += 1
+        signals.append("calcChain.xml present")
+    if fp.has_theme and fp.theme_size > 5000:
+        score += 1
+        signals.append(f"theme1.xml {fp.theme_size}B (real Excel theme)")
+    elif fp.has_theme and fp.theme_size > 0:
+        signals.append(f"theme1.xml {fp.theme_size}B (small, likely library default)")
+    if fp.has_theme_override:
+        score += 1
+        signals.append("Content_Types theme override")
+    if fp.heading_pairs and fp.titles_of_parts:
+        score += 1
+        signals.append("HeadingPairs+TitlesOfParts in app.xml")
+    if fp.has_printer_settings:
+        score += 1
+        signals.append("printerSettings binary present")
+    if fp.has_vba:
+        score += 2
+        signals.append("VBA project present")
+    if fp.has_threaded_comments:
+        score += 1
+        signals.append("threadedComments (Excel 365)")
+    if fp.has_pivots:
+        score += 1
+        signals.append("pivot tables present")
+    if fp.styles_has_count_attr is False:
+        score += 1
+        signals.append("styles.xml omits count attr (Excel-style)")
+    elif fp.styles_has_count_attr is True:
+        signals.append("styles.xml includes count attr (library-style)")
+    if fp.code_name and fp.code_name.lower() == "thisworkbook":
+        score += 1
+        signals.append("workbookPr codeName=ThisWorkbook")
+
+    if fp.last_modified_by:
+        signals.append(f"lastModifiedBy={fp.last_modified_by!r}")
+    if not fp.file_version:
+        signals.append("missing fileVersion (library tell)")
+    if fp.application is None:
+        signals.append("docProps/app.xml missing/empty")
+    if fp.edit_delta_seconds is not None and fp.edit_delta_seconds < 1.0:
+        signals.append(f"created→modified Δ {fp.edit_delta_seconds:.2f}s (automated)")
+
+    fp.signals = signals
+    fp.excel_score = score
+
+    if label == "EXCEL_MAC":
+        fp.verdict = "EXCEL_MAC"
+    elif label == "EXCEL_WIN":
+        fp.verdict = "EXCEL_WIN"
+    elif label == "EXCEL_OTHER":
+        fp.verdict = "EXCEL_OTHER"
+    elif score >= 5:
+        fp.verdict = "EXCEL_LIKELY"
+    elif fp.application is None and not fp.file_version:
+        fp.verdict = "SUSPECT"
+    else:
+        fp.verdict = "UNKNOWN"
+
+    fp.verdict_reason = f"Excel signal score {score}/14"
+    fp.confidence = "high" if score >= 8 else "medium" if score >= 4 else "low"
+
+
+VERDICT_COLOR = {
+    "EXCEL_MAC": GRN, "EXCEL_WIN": GRN, "EXCEL_OTHER": GRN, "EXCEL_LIKELY": GRN,
+    "OPENPYXL": RED, "XLSXWRITER": RED, "ASPOSE": RED, "CLOSEDXML": RED, "EPPLUS": RED,
+    "OPENXML_SDK": RED, "PYTHON_XLSX": RED, "SHEETJS": RED, "LUCKYSHEET": RED,
+    "SPREADJS": RED, "SYNCFUSION": RED, "GEMBOX": RED, "SPIRE": RED,
+    "LIBREOFFICE": YLW, "ONLYOFFICE": YLW, "OPENOFFICE": YLW, "GNUMERIC": YLW,
+    "CALLIGRA": YLW, "WPS_OFFICE": YLW, "APPLE_NUMBERS": YLW, "GOOGLE_SHEETS": YLW,
+    "SUSPECT": YLW, "UNKNOWN": YLW, "MISSING": RED, "INVALID": RED,
+}
+
+
+def fmt_pretty(fp: Fingerprint, verbose: bool = False) -> str:
+    color = VERDICT_COLOR.get(fp.verdict, YLW)
+    out = []
+    out.append(f"{CYN}{BLD}=== {Path(fp.path).name} ==={RST}")
+    if not fp.exists or fp.error:
+        out.append(f"  {RED}[{fp.verdict}]{RST} {fp.error or ''}")
+        return "\n".join(out)
+    out.append(f"  {color}{BLD}[{fp.verdict}]{RST} {fp.verdict_reason}  {DIM}(confidence: {fp.confidence}){RST}")
+    out.append(f"  {DIM}application{RST}    {fp.application or '<missing>'}  {DIM}/{RST}  AppVersion {fp.app_version or '<missing>'}")
+    out.append(f"  {DIM}identity{RST}       creator={fp.creator!r}  lastModifiedBy={fp.last_modified_by!r}")
+    if fp.company or fp.manager:
+        out.append(f"  {DIM}org{RST}            company={fp.company!r}  manager={fp.manager!r}")
+    if fp.edit_delta_seconds is not None:
+        out.append(f"  {DIM}edit-window{RST}    created→modified Δ {fp.edit_delta_seconds:.1f}s")
+    if fp.file_version:
+        fv = " ".join(f"{k}={v!r}" for k, v in fp.file_version.items())
+        out.append(f"  {DIM}fileVersion{RST}    {fv}")
+    else:
+        out.append(f"  {DIM}fileVersion{RST}    <missing>")
+    out.append(f"  {DIM}workbook{RST}       sheets={fp.sheet_count}  definedNames={fp.defined_names_count}  codeName={fp.code_name!r}")
+    flags = []
+    if fp.has_calc_chain: flags.append("calcChain")
+    if fp.has_theme: flags.append(f"theme1({fp.theme_size}B)")
+    if fp.has_printer_settings: flags.append("printerSettings")
+    if fp.has_vba: flags.append(f"{MAG}VBA{RST}")
+    if fp.has_pivots: flags.append("pivots")
+    if fp.has_connections: flags.append("connections")
+    if fp.has_external_links: flags.append("extLinks")
+    if fp.has_charts: flags.append("charts")
+    if fp.has_drawings: flags.append("drawings")
+    if fp.has_comments: flags.append("comments")
+    if fp.has_threaded_comments: flags.append("threadedComments")
+    if fp.has_tables: flags.append("tables")
+    if fp.has_query_tables: flags.append("queryTables")
+    if fp.has_custom_props: flags.append("customProps")
+    out.append(f"  {DIM}artifacts{RST}      {', '.join(flags) or '<none>'}")
+    style_bits = []
+    if fp.styles_has_count_attr is True:
+        style_bits.append("count attr present")
+    elif fp.styles_has_count_attr is False:
+        style_bits.append("count attr omitted")
+    if fp.styles_has_table_styles:
+        style_bits.append("tableStyles")
+    if fp.styles_has_indexed_colors:
+        style_bits.append("indexedColors")
+    if style_bits:
+        out.append(f"  {DIM}styles.xml{RST}     {', '.join(style_bits)}")
+    out.append(f"  {DIM}content-types{RST}  {fp.content_types_override_count} overrides, theme={fp.has_theme_override}")
+    out.append(f"  {DIM}zip{RST}            {fp.entry_count} entries")
+    if verbose and fp.signals:
+        out.append(f"  {DIM}signals{RST}        " + " · ".join(fp.signals))
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="xlsx-provenance",
+        description="Fingerprint .xlsx files for authorship and authenticity.",
+    )
+    ap.add_argument("files", nargs="+", help="paths to .xlsx files")
+    ap.add_argument("--json", action="store_true", help="emit JSON")
+    ap.add_argument("-v", "--verbose", action="store_true", help="show signal breakdown")
+    ap.add_argument("-q", "--quiet", action="store_true", help="one-line summary per file")
+    ap.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    args = ap.parse_args()
+
+    if args.no_color or not sys.stdout.isatty():
+        globals().update({k: "" for k in ("RED", "GRN", "YLW", "CYN", "MAG", "DIM", "BLD", "RST")})
+        for k in list(VERDICT_COLOR):
+            VERDICT_COLOR[k] = ""
+
+    results = [fingerprint(Path(f)) for f in args.files]
+
+    if args.json:
+        json.dump([asdict(r) for r in results], sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+    elif args.quiet:
+        for r in results:
+            color = VERDICT_COLOR.get(r.verdict, YLW)
+            print(f"{color}[{r.verdict:13}]{RST} {Path(r.path).name}  {DIM}{r.verdict_reason}{RST}")
+    else:
+        for r in results:
+            print(fmt_pretty(r, verbose=args.verbose))
+            print()
+
+    bad = {
+        "OPENPYXL", "XLSXWRITER", "ASPOSE", "CLOSEDXML", "EPPLUS",
+        "OPENXML_SDK", "PYTHON_XLSX", "SHEETJS", "LUCKYSHEET",
+        "SPREADJS", "SYNCFUSION", "GEMBOX", "SPIRE",
+        "SUSPECT", "UNKNOWN", "MISSING", "INVALID",
+    }
+    if any(r.verdict in bad for r in results):
+        sys.exit(1)
+
+
+
+
+if __name__ == "__main__":
+    main()

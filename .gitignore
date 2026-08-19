@@ -1,7 +1,5 @@
+dist/
+build/
+*.egg-info/
 __pycache__/
-*.pyc
-.DS_Store
 .venv/
-venv/
-*.xlsx
-!tests/fixtures/*.xlsx
