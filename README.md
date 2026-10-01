@@ -88,12 +88,12 @@ Exit code is `0` if every file is verdict `EXCEL_*` or a non-Excel office suite 
 - **`docProps/app.xml`**: `Application`, `AppVersion`, `Company`, `Manager`, `DocSecurity`, presence of `HeadingPairs` + `TitlesOfParts` (Excel-only, openpyxl skips)
 - **`docProps/core.xml`**: `creator`, `lastModifiedBy`, `created` / `modified` timestamps (and their delta; < 1s smells automated), `lastPrinted`
 - **`xl/workbook.xml`**: `<fileVersion appName="xl" rupBuild="...">` (Excel-only), `workbookPr/@codeName`, defined names, sheet count
-- **Zip artifacts**: `calcChain.xml` (Excel writes, libraries usually skip), `theme/theme1.xml` size (Excel: ~6796–8390 B; openpyxl: < 4 KB), `printerSettings*.bin`, `vbaProject.bin`, `pivotTables/`, `pivotCache/`, `connections.xml`, `externalLinks/`, `charts/`, `drawings/`, `comments*.xml`, `threadedComments` (Excel 365), `tables/`, `queryTables/`
+- **Zip artifacts**: `calcChain.xml` (Excel writes, libraries usually skip), `theme/theme1.xml` size (Excel: ~6796 to 8390 B; openpyxl: < 4 KB), `printerSettings*.bin`, `vbaProject.bin`, `pivotTables/`, `pivotCache/`, `connections.xml`, `externalLinks/`, `charts/`, `drawings/`, `comments*.xml`, `threadedComments` (Excel 365), `tables/`, `queryTables/`
 - **`xl/styles.xml`**: Excel often *omits* `count="N"` on `<cellXfs>`; openpyxl always includes it. Excel writes `<tableStyles>`, `<indexedColors>`.
 - **`xl/sharedStrings.xml`**: `uniqueCount` attribute presence
 - **`[Content_Types].xml`**: number of overrides, presence of theme override
 
-The verdict combines a hard match on the `Application` string with a soft score (0–14) over the structural signals. High score with no library declaration → `EXCEL_LIKELY`.
+The verdict combines a hard match on the `Application` string with a soft score (0 to 14) over the structural signals. High score with no library declaration → `EXCEL_LIKELY`.
 
 ## Examples
 
